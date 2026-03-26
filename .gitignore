@@ -1,0 +1,19 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+
+# Telegram Sessions (個人情報)
+*.session
+*.session-journal
+
+# Databases (履歴データ)
+*.db
+
+# Logs & Temp
+nohup.out
+*.jpg
+*.png
+
+# Config (認証情報が含まれるため、本体は上げない)
+config.yaml

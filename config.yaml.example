@@ -1,0 +1,15 @@
+api_id: 35555555
+api_hash: "0000fb44d9999d6666c55555b888d1e4"
+targets:
+  - name: nanasino
+    user_id: 7777777777
+    archive_channel_id: -1003737373737
+  - name: ohtani
+    user_id: 8282828282
+    archive_channel_id: -1003333333333
+# 【追加】全ユーザー共通の監査（削除・編集）ログ用チャネルID
+全通信監査ログ: -1003838383838
+channel_targets:
+  - name: ゆかいな仲間たち
+    channel_id: -1002626262626
+    archive_channel_id: -10039393939393
