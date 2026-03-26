@@ -1,13 +1,15 @@
 from telethon import TelegramClient
 import asyncio
 
-api_id = 35574291
-api_hash = "0348fb48d9848d6725c51916b839d1e4"
+# ここを自分の情報に書き換えてください
+api_id = 12345678
+api_hash = "your_api_hash_here"
 
 async def main():
     async with TelegramClient("session", api_id, api_hash) as client:
         dialogs = await client.get_dialogs()
         for d in dialogs:
-            print(d.name, d.id)
+            print(f"{d.name}: {d.id}")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
