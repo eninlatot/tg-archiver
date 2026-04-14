@@ -2,38 +2,38 @@ import asyncio
 import yaml
 import sqlite3
 import os
+import logging
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
-from datetime import datetime
+
+# ログ設定
+logging.basicConfig(level=logging.INFO)
 
 # ========================
 # config読み込み
 # ========================
-
 with open("config.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 api_id = config["api_id"]
 api_hash = config["api_hash"]
-
 channel_targets_list = config.get("channel_targets", [])
 channel_targets = {t["channel_id"]: t for t in channel_targets_list}
-
 audit_id = config.get("全通信監査ログ")
 
-client = TelegramClient("session_channel", api_id, api_hash)
+client = TelegramClient("session_channel_v2", api_id, api_hash)
 
 # ========================
 # DB 初期化
 # ========================
-
+# 転送先メッセージID(archive_msg_id)を保存できるようにカラムを追加/変更
 conn = sqlite3.connect("channel_log.db")
 cur = conn.cursor()
-
 cur.execute("""
 CREATE TABLE IF NOT EXISTS messages(
     msg_id INTEGER,
     archive_chat_id INTEGER,
+    archive_msg_id INTEGER,
     text TEXT,
     PRIMARY KEY (msg_id, archive_chat_id)
 )
@@ -43,7 +43,6 @@ conn.commit()
 # ========================
 # ヘルパー
 # ========================
-
 def format_message(event, sender_name):
     time_str = event.message.date.strftime("%Y-%m-%d %H:%M:%S")
     text = event.message.text or ""
@@ -55,7 +54,7 @@ async def get_sender_name(event):
         if sender:
             if hasattr(sender, "first_name"):
                 name = sender.first_name or ""
-                if sender.last_name:
+                if hasattr(sender, "last_name") and sender.last_name:
                     name += f" {sender.last_name}"
                 return name.strip()
             elif hasattr(sender, "title"):
@@ -64,18 +63,9 @@ async def get_sender_name(event):
         pass
     return "チャンネル投稿"
 
-async def get_last_text(archive_id):
-    cur.execute(
-        "SELECT text FROM messages WHERE archive_chat_id=? ORDER BY rowid DESC LIMIT 1",
-        (archive_id,)
-    )
-    row = cur.fetchone()
-    return row[0] if row else None
-
 # ========================
 # 新規メッセージ
 # ========================
-
 @client.on(events.NewMessage)
 async def new_message_handler(event):
     try:
@@ -84,26 +74,20 @@ async def new_message_handler(event):
 
         target = channel_targets[event.chat_id]
         archive_id = target["archive_channel_id"]
-
         sender_name = await get_sender_name(event)
         current_text = format_message(event, sender_name)
 
-        # 重複ガード
-        last_text = await get_last_text(archive_id)
-        if last_text == current_text:
-            return
-
         # 送信
-        await client.send_message(archive_id, current_text)
+        sent_msg = await client.send_message(archive_id, current_text)
 
-        # DB保存
+        # DB保存 (archive_msg_id を記録)
         cur.execute(
-            "INSERT OR REPLACE INTO messages VALUES (?,?,?)",
-            (event.message.id, archive_id, current_text)
+            "INSERT OR REPLACE INTO messages VALUES (?,?,?,?)",
+            (event.message.id, archive_id, sent_msg.id, current_text)
         )
         conn.commit()
 
-        # 添付
+        # 添付ファイル対応
         if event.message.media:
             file = await event.message.download_media()
             if file:
@@ -111,36 +95,38 @@ async def new_message_handler(event):
                 if os.path.exists(file):
                     os.remove(file)
 
-    except RPCError as e:
-        print(f"RPC Error: {e}")
     except Exception as e:
-        print(f"Error: {e}")
+        logging.error(f"NewMessage Error: {e}")
 
 # ========================
-# 削除検知
+# 削除検知 (上書きモード)
 # ========================
-
 @client.on(events.MessageDeleted)
 async def deleted_handler(event):
     try:
         for mid in event.deleted_ids:
-            cur.execute("SELECT archive_chat_id, text FROM messages WHERE msg_id=?", (mid,))
+            cur.execute("SELECT archive_chat_id, archive_msg_id, text FROM messages WHERE msg_id=?", (mid,))
             rows = cur.fetchall()
 
-            for archive_id, old_text in rows:
-                msg = f"## ?? メッセージが削除されました\n\n{old_text}"
-                await client.send_message(archive_id, msg)
+            for archive_id, archive_msg_id, old_text in rows:
+                if not old_text.startswith("??【削除】"):
+                    new_text = f"??【削除】\n{old_text}"
+                    # アーカイブ先のメッセージを直接編集
+                    await client.edit_message(archive_id, archive_msg_id, new_text)
+                    
+                    # 監査ログにも通知
+                    if audit_id:
+                        await client.send_message(audit_id, f"## ?? 削除検知\n{new_text}")
 
-                if audit_id:
-                    await client.send_message(audit_id, msg)
-
+                    cur.execute("UPDATE messages SET text=? WHERE msg_id=? AND archive_chat_id=?", 
+                                (new_text, mid, archive_id))
+        conn.commit()
     except Exception as e:
-        print(f"Delete Error: {e}")
+        logging.error(f"Delete Error: {e}")
 
 # ========================
-# 編集検知
+# 編集検知 (上書きモード)
 # ========================
-
 @client.on(events.MessageEdited)
 async def edited_handler(event):
     try:
@@ -149,49 +135,34 @@ async def edited_handler(event):
 
         target = channel_targets[event.chat_id]
         archive_id = target["archive_channel_id"]
-
-        sender_name = await get_sender_name(event)
-        new_text = format_message(event, sender_name)
-
-        cur.execute(
-            "SELECT text FROM messages WHERE msg_id=? AND archive_chat_id=?",
-            (event.message.id, archive_id)
-        )
+        
+        cur.execute("SELECT archive_msg_id, text FROM messages WHERE msg_id=? AND archive_chat_id=?", 
+                    (event.message.id, archive_id))
         row = cur.fetchone()
-        old_text = row[0] if row else "(不明)"
+        if not row: return
+        
+        archive_msg_id, old_text = row
+        sender_name = await get_sender_name(event)
+        new_content = format_message(event, sender_name)
+        
+        if old_text == new_content: return
 
-        if old_text == new_text:
-            return
+        # アーカイブ先のメッセージを上書き
+        await client.edit_message(archive_id, archive_msg_id, new_content)
 
-        msg = (
-            "## ?? メッセージが編集されました\n\n"
-            "[前]\n"
-            f"{old_text}\n\n"
-            "[後]\n"
-            f"{new_text}"
-        )
-
-        await client.send_message(archive_id, msg)
-
+        # 監査ログ用
         if audit_id:
+            msg = f"## ?? 編集検知\n[前]\n{old_text}\n\n[後]\n{new_content}"
             await client.send_message(audit_id, msg)
 
-        # DB更新
-        cur.execute(
-            "UPDATE messages SET text=? WHERE msg_id=? AND archive_chat_id=?",
-            (new_text, event.message.id, archive_id)
-        )
+        cur.execute("UPDATE messages SET text=? WHERE msg_id=? AND archive_chat_id=?", 
+                    (new_content, event.message.id, archive_id))
         conn.commit()
-
     except Exception as e:
-        print(f"Edit Error: {e}")
-
-# ========================
-# 起動
-# ========================
+        logging.error(f"Edit Error: {e}")
 
 async def main():
-    print("Channel Archiver started")
+    logging.info("Channel Archiver (Edit-Support Mode) started")
     await client.start()
     await client.run_until_disconnected()
 
