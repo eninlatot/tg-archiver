@@ -28,12 +28,24 @@ async def my_event_handler(event):
         name = sender.first_name if sender.first_name else "Unknown"
         timestamp = event.date.strftime('%Y-%m-%d %H:%M:%S')
         
-        display_text = f"[{timestamp}] {name}\n{event.text}"
+        # 本文の組み立て（テキストがない場合は空文字にする）
+        msg_text = event.text if event.text else ""
+        display_text = f"[{timestamp}] {name}\n{msg_text}"
         
-        # 転送
-        sent_msg = await client.send_message(dest_channel_id, display_text)
+        # --- 修正ポイント ---
+        if event.message.media:
+            # 画像などのメディアがある場合は send_file を使う
+            sent_msg = await client.send_file(
+                dest_channel_id, 
+                event.message.media, 
+                caption=display_text
+            )
+        else:
+            # テキストのみの場合はこれまで通り send_message
+            sent_msg = await client.send_message(dest_channel_id, display_text)
+        # ------------------
 
-        # ID紐付け保存
+        # ID紐付け保存（ここは変更なし）
         cursor = db.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO messages (original_id, archive_msg_id, channel_id, text) VALUES (?, ?, ?, ?)",

@@ -77,23 +77,27 @@ async def new_message_handler(event):
         sender_name = await get_sender_name(event)
         current_text = format_message(event, sender_name)
 
-        # 送信
-        sent_msg = await client.send_message(archive_id, current_text)
+        # --- 修正ポイント：テキストとメディアをまとめて1回で送信 ---
+        if event.message.media:
+            # メディアがある場合は send_file を使い、テキストをキャプションにする
+            sent_msg = await client.send_file(
+                archive_id, 
+                event.message.media, 
+                caption=current_text
+            )
+        else:
+            # テキストのみの場合はこれまで通り
+            sent_msg = await client.send_message(archive_id, current_text)
+        # ----------------------------------------------------
 
-        # DB保存 (archive_msg_id を記録)
+        # DB保存 (これにより、画像付きメッセージも削除/編集検知の対象になります)
         cur.execute(
             "INSERT OR REPLACE INTO messages VALUES (?,?,?,?)",
             (event.message.id, archive_id, sent_msg.id, current_text)
         )
         conn.commit()
-
-        # 添付ファイル対応
-        if event.message.media:
-            file = await event.message.download_media()
-            if file:
-                await client.send_file(archive_id, file)
-                if os.path.exists(file):
-                    os.remove(file)
+        
+        logging.info(f"Archived Channel Message: {event.message.id} -> {sent_msg.id}")
 
     except Exception as e:
         logging.error(f"NewMessage Error: {e}")
