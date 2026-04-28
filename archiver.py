@@ -2,6 +2,7 @@ import yaml
 import sqlite3
 import logging
 from telethon import TelegramClient, events
+from datetime import datetime
 
 # ログ設定
 logging.basicConfig(level=logging.INFO)
@@ -26,13 +27,13 @@ async def my_event_handler(event):
         
         sender = await event.get_sender()
         name = sender.first_name if sender.first_name else "Unknown"
-        timestamp = event.date.strftime('%Y-%m-%d %H:%M:%S')
+        # 投稿時刻を日本時間で取得
+        timestamp = event.date.astimezone().strftime('%Y-%m-%d %H:%M:%S')
         
         # 本文の組み立て（テキストがない場合は空文字にする）
         msg_text = event.text if event.text else ""
         display_text = f"[{timestamp}] {name}\n{msg_text}"
         
-        # --- 修正ポイント ---
         if event.message.media:
             # 画像などのメディアがある場合は send_file を使う
             sent_msg = await client.send_file(
@@ -41,11 +42,10 @@ async def my_event_handler(event):
                 caption=display_text
             )
         else:
-            # テキストのみの場合はこれまで通り send_message
+            # テキストのみの場合は send_message
             sent_msg = await client.send_message(dest_channel_id, display_text)
-        # ------------------
 
-        # ID紐付け保存（ここは変更なし）
+        # ID紐付け保存
         cursor = db.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO messages (original_id, archive_msg_id, channel_id, text) VALUES (?, ?, ?, ?)",
@@ -62,6 +62,9 @@ async def my_event_handler(event):
 async def deleted_handler(event):
     try:
         cursor = db.cursor()
+        # 削除を検知した「今」の時刻を日本時間で取得
+        now_time = datetime.now().astimezone().strftime('%H:%M:%S')
+
         for deleted_id in event.deleted_ids:
             cursor.execute(
                 "SELECT archive_msg_id, channel_id, text FROM messages WHERE original_id=?", 
@@ -71,13 +74,15 @@ async def deleted_handler(event):
             
             if row:
                 archive_msg_id, channel_id, original_text = row
+                # まだ削除マークがついていない場合のみ更新
                 if not original_text.startswith("??【削除】"):
-                    new_text = f"??【削除】\n{original_text}"
+                    # 先頭に【削除】と検知時刻を追記
+                    new_text = f"??【削除】(検知: {now_time})\n{original_text}"
                     await client.edit_message(channel_id, archive_msg_id, new_text)
                     
                     cursor.execute("UPDATE messages SET text=? WHERE original_id=?", (new_text, deleted_id))
                     db.commit()
-                    logging.info(f"Message Edited (Deleted): {deleted_id}")
+                    logging.info(f"Message Edited (Deleted) at {now_time}: {deleted_id}")
 
     except Exception as e:
         logging.error(f"Error in MessageDeleted: {e}")
